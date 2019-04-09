@@ -1,0 +1,144 @@
+ZGB_PATH_UNIX := $(subst ',,$(subst \,/,'$(ZGB_PATH)'))
+GBDK_HOME := c:/gbdk
+PATH := $(GBDK_HOME)/bin/make-3.81-bin/bin;$(ZGB_PATH_UNIX)/../env/SDCC/bin;$(PATH)
+
+#--- Default build will be release. Can be overiden passing BUILD_TYPE = debug as a parameter
+BUILD_TYPE = Release
+CGB = yes
+PALETTES = 0
+
+ifneq (,$(findstring Release,$(BUILD_TYPE)))
+	BUILD_DEFS += -DNDEBUG
+else
+	PROJECT_NAME := $(PROJECT_NAME)_Debug
+endif
+
+OBJDIR = ../$(BUILD_TYPE)
+OBJDIR_RES = ../$(BUILD_TYPE)/res
+OBJDIR_ZGB = ../$(BUILD_TYPE)/zgb
+BINDIR = ../bin
+
+LCC = $(GBDK_HOME)/bin/lcc
+SDCC = sdcc
+SDASGB = sdasgb
+BGB = $(GBDK_HOME)/bin/bgb/bgb.exe
+B2S = $(GBDK_HOME)/bin/bin2s.exe
+
+ifneq ($(strip $(N_BANKS)),)
+	LFLAGS_NBANKS = -Wl-yt1 -Wl-yo$(N_BANKS)
+endif
+
+CFLAGS = -mgbz80 -Dnonbanked= -I $(GBDK_HOME)/include -I $(GBDK_HOME)/include/asm $(BUILD_DEFS) -I../include -I$(ZGB_PATH_UNIX)/include 
+#-Wa-l -Wl-m -Wl-j 
+
+EXTENSION = gb
+ifneq (,$(findstring Color,$(BUILD_TYPE)))
+	LFLAGS_NBANKS += -Wl-yp0x143=0xC0
+	CFLAGS += -DCGB
+	EXTENSION = gbc
+endif
+
+LFLAGS = $(LFLAGS_NBANKS)
+
+current_dir = $(shell pwd)
+
+ASMS_ZGB    = $(foreach dir,$(ZGB_PATH_UNIX)/src,$(notdir $(wildcard $(dir)/*.s)))
+CLASSES_ZGB = $(foreach dir,$(ZGB_PATH_UNIX)/src,$(notdir $(wildcard $(dir)/*.c)))
+ASMS        = $(foreach dir,.,$(notdir $(wildcard $(dir)/*.s))) 
+CLASSES     = $(foreach dir,.,$(notdir $(wildcard $(dir)/*.c))) 
+RESOURCES   = $(foreach dir,../res/src,$(notdir $(wildcard $(dir)/*.c)))
+MUSIC		= $(foreach dir,../res/music,$(notdir $(wildcard $(dir)/*.sav)))
+OBJS = 	$(RESOURCES:%.c=$(OBJDIR_RES)/%.o) $(ASMS_ZGB:%.s=$(OBJDIR_ZGB)/%.o) $(CLASSES_ZGB:%.c=$(OBJDIR_ZGB)/%.o) $(CLASSES:%.c=$(OBJDIR)/%.o) $(MUSIC:%.sav=$(OBJDIR_RES)/%.o)
+
+#dependencies -------------------------------------------------------------------------------------------
+ifneq ($(MAKECMDGOALS),clean)
+-include $(CLASSES:%.c=$(OBJDIR)/%.d) 
+-include $(CLASSES_ZGB:%.c=$(OBJDIR_ZGB)/%.d)
+endif
+
+$(OBJDIR_ZGB)/%.d: $(ZGB_PATH_UNIX)/src/%.c
+	@set -e; mkdir -p $(OBJDIR_ZGB); rm -f $@; \
+	$(SDCC) -MM $(CFLAGS) $< > $@.$$$$; \
+ 	sed 's,\($*\)\.rel[ :]*,$(OBJDIR_ZGB)/$*.o $@ : ,g' < $@.$$$$ > $@; \
+	rm -f $@.$$$$
+
+$(OBJDIR)/%.d: %.c
+	@set -e; mkdir -p $(OBJDIR);rm -f $@; \
+	$(SDCC) -MM $(CFLAGS) $< > $@.$$$$; \
+ 	sed 's,\($*\)\.rel[ :]*,$(OBJDIR)/$*.o $@ : ,g' < $@.$$$$ > $@; \
+	rm -f $@.$$$$
+#---------------------------------------------------------------------------------------------------------
+
+$(BINDIR):
+	@echo Creating folder $(BINDIR)
+	@mkdir $(BINDIR)
+	
+$(OBJDIR):
+	@echo Creating folder $(OBJDIR)
+	@mkdir $(OBJDIR)
+
+$(OBJDIR_RES):
+	@echo Creating folder $(OBJDIR_RES)
+	@mkdir $(OBJDIR_RES)
+	
+$(OBJDIR_ZGB):
+	@echo Creating folder $(OBJDIR_ZGB)
+	@mkdir $(OBJDIR_ZGB)
+
+$(OBJDIR)/%.o: %.s
+	@echo compiling resource assembly files$<
+	@$(SDASGB) -plosgff -I"libc" $(filter --constseg CODE_%, $(subst .b,--constseg CODE_,$(suffix $(<:%.s=%)))) -c -o $@ $<
+
+$(OBJDIR)/%.o: %.c
+	@echo compiling $<
+	@$(SDCC) $(CFLAGS) $(filter --constseg CODE_%, $(subst .b,--constseg CODE_,$(suffix $(<:%.c=%)))) -c -o $@ $<
+	
+$(OBJDIR)/zgb/%.o: $(ZGB_PATH_UNIX)/src/%.s
+	@echo compiling ZGB assembly files$<
+	@$(SDASGB) -plosgff -I"libc" $(filter --constseg CODE_%, $(subst .b,--constseg CODE_,$(suffix $(<:%.s=%)))) -c -o $@ $<
+
+$(OBJDIR)/zgb/%.o: $(ZGB_PATH_UNIX)/src/%.c
+	@echo compiling $<
+	@$(SDCC) $(CFLAGS) $(filter --constseg CODE_%, $(subst .b,--constseg CODE_,$(suffix $(<:%.c=%)))) -c -o $@ $<
+	
+$(OBJDIR_RES)/%.o: ../res/src/%.c
+	@echo compiling resource: $<
+	@if grep -q "unsigned char" $<; then \
+		sed -i "s/unsigned char/const unsigned  char/g" $<; \
+	fi
+
+	@if grep -q "unsigned char $(basename $(basename $(notdir $<)))CGB" $<; then \
+		sed -i 's@unsigned char $(basename $(basename $(notdir $<)))CGB@const unsigned  char $(basename $(basename $(notdir $<)))CGB[] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};/*@g' $<; \
+	fi	
+	
+	@$(SDCC) $(CFLAGS) $(filter --constseg CODE_%, $(subst .b,--constseg CODE_,$(suffix $(<:%.c=%)))) -c -o $@ $<
+
+$(OBJDIR_RES)/%.o: ../res/music/%.sav
+	@echo compiling carillon music$<
+	@$(B2S) $< $(subst .b,,$(suffix $(<:%.sav=%))) > /dev/null
+	@mv music.s $(OBJDIR)/music.s
+	@$(LCC) $(CFLAGS) -c -o $@ $(OBJDIR)/music.s
+	@rm $(OBJDIR)/music.s
+	
+$(BINDIR)/$(PROJECT_NAME).$(EXTENSION): $(OBJDIR) $(OBJDIR_RES) $(OBJDIR_ZGB) $(BINDIR) $(OBJS) $(COMMON_OBJS)
+	@echo Linking
+	$(LCC) $(LFLAGS) -o $(OBJDIR)/$(PROJECT_NAME).$(EXTENSION) $(OBJS) $(COMMON_OBJS)
+	mv $(OBJDIR)/$(PROJECT_NAME).$(EXTENSION) $(BINDIR)/$(PROJECT_NAME).$(EXTENSION)
+
+build_lib: $(OBJDIR) $(OBJS)
+
+build_gb: $(BINDIR)/$(PROJECT_NAME).$(EXTENSION)
+
+clean:
+	@echo Cleaning $(PROJECT_NAME)
+	@rm -rf $(BINDIR)
+	@rm  -f $(OBJDIR)/*.*
+	@rm  -f $(OBJDIR_ZGB)/*.*
+	@rm -rf .map
+	@rm -rf .lst
+
+run: all
+	@if test -f $(BINDIR)/$(PROJECT_NAME).$(EXTENSION); then \
+		echo Running $(BINDIR)/$(PROJECT_NAME).$(EXTENSION); \
+		$(BGB) $(BINDIR)/$(PROJECT_NAME).$(EXTENSION); \
+	fi
